@@ -10,6 +10,41 @@ const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+/**
+ * 🔧 强健的 JSON 清洗函数 (Sanitization)
+ * 解决 AI 返回 Markdown 代码块或格式问题导致的解析错误
+ */
+function cleanJson(text: string): string {
+  // 1. 移除 Markdown 代码块标记
+  let clean = text.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+  // 2. 提取纯 JSON 部分（找到第一个 { 和最后一个 }）
+  const firstBrace = clean.indexOf('{');
+  const lastBrace = clean.lastIndexOf('}');
+
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    clean = clean.substring(firstBrace, lastBrace + 1);
+  }
+
+  // 3. 尝试修复常见的换行符问题（替换未转义的实际换行符为 \n）
+  // 注意：这个步骤比较复杂，只处理明显的错误情况
+  // 例如：字符串值内的真实换行符应该被转义
+  try {
+    // 先尝试直接解析，如果成功就不需要修复
+    JSON.parse(clean);
+    return clean;
+  } catch {
+    // 如果解析失败，尝试修复常见问题
+    // 替换字符串值内的实际换行符为 \n（简单策略）
+    // 这个正则会匹配 "text" 内的真实换行符
+    clean = clean.replace(/("(?:[^"\\]|\\.)*?")/g, (match) => {
+      return match.replace(/\r?\n/g, '\\n').replace(/\t/g, '\\t');
+    });
+  }
+
+  return clean;
+}
+
 // Stage 定义
 const STAGE_CONFIGS = {
   1: {
@@ -82,6 +117,12 @@ export async function POST(request: NextRequest) {
 - Stage 1: 表层行为测试（应激反应）
 - Stage 2: 深层动力测试（动机挖掘）
 - Stage 3: 阴影与防御测试（压力测试）
+
+🔴 **CRITICAL: JSON 格式要求（Mandatory）**
+- Return RAW JSON only. Do NOT wrap in Markdown code blocks (no \`\`\`json).
+- Do NOT output actual newlines inside string values; use '\\n' instead.
+- Ensure all strings are properly escaped (quotes, backslashes, newlines).
+- The response must be parseable by JSON.parse() without any preprocessing.
 
 重要原则：
 1. 严禁使用抽象问题（如"你焦虑吗？"）
@@ -188,17 +229,32 @@ export async function POST(request: NextRequest) {
     // 解析 AI 返回的内容
     const content = message.content[0];
     if (content.type !== "text") {
-      throw new Error("Unexpected response type");
+      throw new Error("Unexpected response type from AI");
     }
 
-    // 提取 JSON（AI 可能会用 ```json 包裹）
-    let responseText = content.text.trim();
-    const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
-    if (jsonMatch) {
-      responseText = jsonMatch[1];
+    const rawText = content.text.trim();
+
+    // 🔧 使用强健的 JSON 清洗逻辑
+    let questionData;
+    try {
+      const cleanedText = cleanJson(rawText);
+      questionData = JSON.parse(cleanedText);
+    } catch (parseError) {
+      // 详细记录解析错误，方便调试
+      console.error("❌ JSON Parse Error:", parseError);
+      console.error("📄 Raw AI Response:", rawText);
+      console.error("🧹 Cleaned Text:", cleanJson(rawText));
+
+      throw new Error(
+        `Failed to parse AI response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`
+      );
     }
 
-    const questionData = JSON.parse(responseText);
+    // 验证返回的数据结构
+    if (!questionData.question || !questionData.options) {
+      console.error("⚠️ Invalid question data structure:", questionData);
+      throw new Error("AI response missing required fields (question, options)");
+    }
 
     return NextResponse.json({
       success: true,

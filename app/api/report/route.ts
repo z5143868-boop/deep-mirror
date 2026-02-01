@@ -10,6 +10,35 @@ const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+/**
+ * 🔧 强健的 JSON 清洗函数 (Sanitization)
+ * 解决 AI 返回 Markdown 代码块或格式问题导致的解析错误
+ */
+function cleanJson(text: string): string {
+  // 1. 移除 Markdown 代码块标记
+  let clean = text.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+  // 2. 提取纯 JSON 部分（找到第一个 { 和最后一个 }）
+  const firstBrace = clean.indexOf('{');
+  const lastBrace = clean.lastIndexOf('}');
+
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    clean = clean.substring(firstBrace, lastBrace + 1);
+  }
+
+  // 3. 尝试修复常见的换行符问题
+  try {
+    JSON.parse(clean);
+    return clean;
+  } catch {
+    clean = clean.replace(/("(?:[^"\\]|\\.)*?")/g, (match) => {
+      return match.replace(/\r?\n/g, '\\n').replace(/\t/g, '\\t');
+    });
+  }
+
+  return clean;
+}
+
 interface Answer {
   question: string;
   selectedOption: { id: string; text: string };
@@ -37,6 +66,12 @@ export async function POST(request: NextRequest) {
 你的任务是基于用户在三个阶段的全部回答，生成一份深度心理分析报告。
 
 这份报告不是为了安慰用户，而是为了让用户看清自己的真实面目——包括那些被隐藏的矛盾、风险和可能性。
+
+🔴 **CRITICAL: JSON 格式要求（Mandatory）**
+- Return RAW JSON only. Do NOT wrap in Markdown code blocks (no \`\`\`json).
+- Do NOT output actual newlines inside string values; use '\\n' instead.
+- Ensure all strings are properly escaped (quotes, backslashes, newlines).
+- The response must be parseable by JSON.parse() without any preprocessing.
 
 报告必须包含以下四个板块，以 JSON 格式返回：
 
@@ -84,17 +119,31 @@ export async function POST(request: NextRequest) {
 
     const content = message.content[0];
     if (content.type !== "text") {
-      throw new Error("Unexpected response type");
+      throw new Error("Unexpected response type from AI");
     }
 
-    // 解析 JSON
-    let responseText = content.text.trim();
-    const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
-    if (jsonMatch) {
-      responseText = jsonMatch[1];
+    const rawText = content.text.trim();
+
+    // 🔧 使用强健的 JSON 清洗逻辑
+    let reportData;
+    try {
+      const cleanedText = cleanJson(rawText);
+      reportData = JSON.parse(cleanedText);
+    } catch (parseError) {
+      console.error("❌ JSON Parse Error:", parseError);
+      console.error("📄 Raw AI Response:", rawText);
+      console.error("🧹 Cleaned Text:", cleanJson(rawText));
+
+      throw new Error(
+        `Failed to parse AI response as JSON: ${parseError instanceof Error ? parseError.message : String(parseError)}`
+      );
     }
 
-    const reportData = JSON.parse(responseText);
+    // 验证返回的数据结构
+    if (!reportData.core_identity || !reportData.inner_conflict || !reportData.risk_prediction || !reportData.evolution_path) {
+      console.error("⚠️ Invalid report data structure:", reportData);
+      throw new Error("AI response missing required fields in report structure");
+    }
 
     return NextResponse.json({
       success: true,
