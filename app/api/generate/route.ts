@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { formatUserProfileForPrompt, getTroublesDetailForAnalysis, getInterestsAnalysis } from "../utils/formatUserProfile";
 
+// 🔑 Vercel 超时配置 (关键：解决 Hobby 计划的 10 秒超时限制)
+export const maxDuration = 60; // 允许最长执行 60 秒 (Hobby 计划的上限)
+export const dynamic = 'force-dynamic'; // 强制动态渲染
+
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
@@ -203,8 +207,19 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Generate API Error:", error);
+
+    // 🔑 优化错误返回：提供具体的错误信息而不是模糊的 "Unknown Error"
+    const errorMessage = error instanceof Error ? error.message : "生成题目失败，请稍后重试";
+    const errorDetails = error instanceof Error ? error.stack : String(error);
+
+    // 记录详细的错误信息到服务器日志
+    console.error("Detailed error stack:", errorDetails);
+
     return NextResponse.json(
-      { error: "生成题目失败，请稍后重试" },
+      {
+        error: errorMessage,
+        details: process.env.NODE_ENV === 'development' ? errorDetails : undefined
+      },
       { status: 500 }
     );
   }
